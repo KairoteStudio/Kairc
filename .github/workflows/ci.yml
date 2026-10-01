@@ -13,10 +13,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: 1.24.x
-          cache: true
-      - run: go test -race ./...
-      - run: go vet ./...
-      - run: go build ./cmd/kaircd
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build libsodium-dev libsqlite3-dev
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DKAIRC_ENABLE_INTEGRATION_TESTS=ON
+      - name: Build
+        run: cmake --build build --parallel 2
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Validate example configuration
+        run: ./build/kaircd --config config/kairc.conf.example --check-config
+      - name: Configure ASan and UBSan
+        run: >-
+          cmake -S . -B build-sanitize -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+      - name: Build with sanitizers
+        run: cmake --build build-sanitize --parallel 2
+      - name: Test with sanitizers
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ctest --test-dir build-sanitize --output-on-failure

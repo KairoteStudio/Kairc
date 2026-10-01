@@ -3,16 +3,17 @@ services:
     build: .
     restart: unless-stopped
     init: true
+    # The IRC gateway deliberately binds host loopback. Host networking keeps
+    # that trust boundary intact; this compose file therefore targets Linux.
+    network_mode: host
     read_only: true
-    ports:
-      - "6667:6667"
-      - "127.0.0.1:8080:8080"
-    environment:
-      KAIRC_SERVER_NAME: irc.example.org
-      KAIRC_NETWORK: KairoteNet
-      KAIRC_MOTD: Welcome to Kairc.
-      KAIRC_MAX_CLIENTS: "1024"
+    volumes:
+      - ./config/kairc.conf.example:/etc/kairc/kairc.conf:ro
+      - kairc-data:/var/lib/kairc/data
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
+
+volumes:
+  kairc-data:

@@ -1,0 +1,27 @@
+# Kairc is a local IRC gateway. It must stay on a loopback address.
+irc_listen = 127.0.0.1:6667
+
+# Optional inbound P2P listener. For an onion service, point Tor's HiddenServicePort
+# at this loopback listener; do not expose it unless you understand the metadata risk.
+p2p_listen =
+
+# Tor SOCKS5 proxy used by tor:// peer entries.
+tor_proxy = 127.0.0.1:9050
+
+# Repeat peer= for each static seed. No clearnet seed is enabled by default.
+# peer = tor://exampleexampleexampleexampleexampleexampleexampleexample.onion:7777
+# Development only:
+# peer = tcp://127.0.0.1:7778
+
+database = ./data/kairc.db
+network_id = kairc-devnet-1
+work_bits = 12
+retention_hours = 24
+pending_limit = 2048
+
+# Empty or "public" means plaintext on the replicated event graph.
+channel.#lobby = public
+
+# Generate a 32-byte secret with: kaircd --gen-channel-secret
+# Everyone in a private channel must configure the same secret out of band.
+# channel.#private = 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef

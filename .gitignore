@@ -1,7 +1,10 @@
-/bin/
-/dist/
+/build/
+/build-*/
+/data/
+/kairc.conf
 *.log
 *.pem
 *.key
 .env
 .DS_Store
+__pycache__/
