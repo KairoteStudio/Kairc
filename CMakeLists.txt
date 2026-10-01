@@ -29,10 +29,11 @@ add_library(kairc_core
     src/types.cpp
 )
 target_include_directories(kairc_core PUBLIC include)
+target_include_directories(kairc_core PRIVATE ${SQLite3_INCLUDE_DIRS})
 target_link_libraries(kairc_core
     PUBLIC
         PkgConfig::SODIUM
-        SQLite3::SQLite3
+        ${SQLite3_LIBRARIES}
         Threads::Threads
 )
 kairc_enable_warnings(kairc_core)
