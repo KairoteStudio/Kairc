@@ -10,7 +10,11 @@ class Node;
 
 class PeerNetwork {
   public:
-    PeerNetwork(Node &node, std::optional<HostPort> listen, std::vector<PeerEndpoint> peers);
+    PeerNetwork(Node &node, std::optional<HostPort> listen, std::vector<PeerEndpoint> peers,
+                PeerLimits limits = {}, const std::optional<Key> &identity_seed = std::nullopt,
+                std::vector<PublicKey> trusted_peer_keys = {}, bool allow_unknown_inbound = false,
+                bool allow_unknown_outbound = false, PeerDiscoveryOptions discovery = {},
+                std::optional<HostPort> tor_proxy = std::nullopt);
     ~PeerNetwork();
 
     PeerNetwork(const PeerNetwork &) = delete;

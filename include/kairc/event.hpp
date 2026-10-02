@@ -6,7 +6,7 @@
 
 namespace kairc {
 
-inline constexpr std::uint8_t kEventVersion = 1;
+inline constexpr std::uint8_t kEventVersion = 2;
 inline constexpr std::uint64_t kEpochMilliseconds = 60ULL * 60ULL * 1000ULL;
 inline constexpr std::size_t kMaxEventParents = 4;
 inline constexpr std::size_t kMaxEventContent = 8192;

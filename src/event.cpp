@@ -185,8 +185,11 @@ bool Event::verify(const Hash &expected_network, std::uint8_t work_bits, std::ui
 }
 
 Hash Event::calculate_id() const {
-    const Bytes wire = serialize();
-    return crypto::hash("kairc/event-id/v1", wire);
+    // A signature authenticates these bytes but is not part of event identity.
+    // Otherwise an author can reuse one PoW solution with multiple valid Ed25519
+    // signatures and defeat content-ID deduplication.
+    const Bytes canonical = unsigned_bytes();
+    return crypto::hash("kairc/event-id/v2", canonical);
 }
 
 Hash network_hash(std::string_view network_id, std::uint8_t work_bits) {
@@ -200,7 +203,7 @@ Hash network_hash(std::string_view network_id, std::uint8_t work_bits) {
     writer.string(network_id);
     writer.u8(work_bits);
     const Bytes parameters = std::move(writer).take();
-    return crypto::hash("kairc/network/v1", parameters);
+    return crypto::hash("kairc/network/v2", parameters);
 }
 
 Hash epoch_root(const Hash &network, std::uint64_t epoch) {

@@ -5,10 +5,31 @@ irc_listen = 127.0.0.1:6667
 # at this loopback listener; do not expose it unless you understand the metadata risk.
 p2p_listen =
 
+# P2P links use a persistent Ed25519 identity to authenticate their ephemeral
+# X25519 handshake. Generate a seed with `kaircd --gen-peer-identity` before
+# enabling peers or a listener. Exchange only the public `trusted_peer` value.
+# p2p_identity_seed = 64_HEX_CHARACTERS
+# trusted_peer = 64_HEX_CHARACTER_PUBLIC_KEY
+allow_unknown_inbound = false
+allow_unknown_outbound = false
+
 # Tor SOCKS5 proxy used by tor:// peer entries.
 tor_proxy = 127.0.0.1:9050
 
-# Repeat peer= for each static seed. No clearnet seed is enabled by default.
+# Discovery is opt-in. "trusted" only exchanges records over trusted links and
+# only accepts subjects listed by trusted_peer/bootstrap_peer. "open" accepts
+# self-signed unknown identities and remains vulnerable to Sybil/eclipse attacks.
+peer_discovery = off
+
+# bootstrap_peer pins the transport endpoint to the expected node identity and
+# also treats that identity as trusted. Repeat for independent bootstrap nodes.
+# bootstrap_peer = 64_HEX_PUBLIC_KEY@tor://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion:7777
+
+# Publish exactly one onion-v3 endpoint only when a Tor onion service forwards
+# it to p2p_listen. Open advertisement also requires allow_unknown_inbound=true.
+# advertise_peer = tor://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion:7777
+
+# Legacy static peer entries remain available. No seed is enabled by default.
 # peer = tor://exampleexampleexampleexampleexampleexampleexampleexample.onion:7777
 # Development only:
 # peer = tcp://127.0.0.1:7778
@@ -18,6 +39,26 @@ network_id = kairc-devnet-1
 work_bits = 12
 retention_hours = 24
 pending_limit = 2048
+pending_per_peer_limit = 256
+pending_ttl_seconds = 300
+max_store_mib = 512
+max_events_per_epoch = 100000
+verification_workers = 4
+presentation_delay_ms = 750
+
+# Per-authenticated-identity and process-wide budgets are enforced in both
+# directions. Reconnecting or opening parallel sessions does not reset them.
+# Counted only after a peer signs the fresh responder cookie. A busy identity
+# cannot consume every global reconnect or force unbounded local key generation.
+peer_authenticated_handshakes_per_minute = 12
+global_authenticated_handshakes_per_minute = 120
+peer_bytes_per_minute = 8388608
+peer_frames_per_minute = 600
+peer_events_per_minute = 120
+global_peer_bytes_per_minute = 67108864
+global_peer_frames_per_minute = 4800
+global_peer_events_per_minute = 960
+peer_idle_timeout_seconds = 120
 
 # Empty or "public" means plaintext on the replicated event graph.
 channel.#lobby = public

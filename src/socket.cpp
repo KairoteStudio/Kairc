@@ -2,8 +2,10 @@
 
 #include <arpa/inet.h>
 #include <cerrno>
+#include <chrono>
 #include <condition_variable>
 #include <fcntl.h>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <netdb.h>
@@ -264,11 +266,28 @@ Socket Socket::listen_tcp(const HostPort &address, int backlog) {
 
 Socket Socket::accept() const {
     for (;;) {
+        auto accepted =
+            accept_until(std::chrono::steady_clock::now() + std::chrono::milliseconds(250));
+        if (accepted) {
+            return std::move(*accepted);
+        }
+    }
+}
+
+std::optional<Socket> Socket::accept_until(std::chrono::steady_clock::time_point deadline) const {
+    for (;;) {
         SocketOperation operation(state_);
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+            return std::nullopt;
+        }
+        auto remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+        remaining = std::clamp<std::int64_t>(remaining, 1, std::numeric_limits<int>::max());
         pollfd wait{operation.descriptor(), POLLIN, 0};
-        const int ready = ::poll(&wait, 1, 250);
+        const int ready = ::poll(&wait, 1, static_cast<int>(remaining));
         if (ready == 0) {
-            continue;
+            return std::nullopt;
         }
         if (ready < 0) {
             if (errno == EINTR) {
@@ -280,11 +299,51 @@ Socket Socket::accept() const {
         if (descriptor >= 0) {
             return Socket(descriptor);
         }
-        if (errno == EINTR) {
-            continue;
+        if (errno != EINTR) {
+            throw Error(socket_error("could not accept connection"));
         }
-        throw Error(socket_error("could not accept connection"));
     }
+}
+
+std::optional<std::string> Socket::peer_rate_key() const {
+    SocketOperation operation(state_);
+    sockaddr_storage address{};
+    socklen_t address_size = sizeof(address);
+    if (::getpeername(operation.descriptor(), reinterpret_cast<sockaddr *>(&address),
+                      &address_size) < 0) {
+        throw Error(socket_error("could not inspect peer address"));
+    }
+    std::string key;
+    if (address.ss_family == AF_INET) {
+        const auto &ipv4 = reinterpret_cast<const sockaddr_in &>(address).sin_addr;
+        const auto *bytes = reinterpret_cast<const Byte *>(&ipv4);
+        if (bytes[0] == 127) {
+            return std::nullopt;
+        }
+        key.assign("4", 1);
+        key.append(reinterpret_cast<const char *>(bytes), sizeof(ipv4));
+        return key;
+    }
+    if (address.ss_family == AF_INET6) {
+        const auto &ipv6 = reinterpret_cast<const sockaddr_in6 &>(address).sin6_addr;
+        if (IN6_IS_ADDR_LOOPBACK(&ipv6)) {
+            return std::nullopt;
+        }
+        if (IN6_IS_ADDR_V4MAPPED(&ipv6)) {
+            if (ipv6.s6_addr[12] == 127) {
+                return std::nullopt;
+            }
+            key.assign("4", 1);
+            key.append(reinterpret_cast<const char *>(&ipv6.s6_addr[12]), 4);
+            return key;
+        }
+        // Rate-limit IPv6 by /64 so rotating interface addresses does not
+        // trivially bypass the admission bound.
+        key.assign("6", 1);
+        key.append(reinterpret_cast<const char *>(ipv6.s6_addr), 8);
+        return key;
+    }
+    throw Error("peer address has an unsupported family");
 }
 
 void Socket::send_all(std::span<const Byte> data) const {
@@ -299,6 +358,63 @@ void Socket::send_all(std::span<const Byte> data) const {
         }
         if (written < 0 && errno == EINTR) {
             continue;
+        }
+        throw Error(socket_error("socket write failed"));
+    }
+}
+
+void Socket::send_all_until(std::span<const Byte> data,
+                            std::chrono::steady_clock::time_point deadline) const {
+    SocketOperation operation(state_);
+    std::size_t offset = 0;
+    while (offset < data.size()) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+            throw Error("socket write deadline exceeded");
+        }
+        auto remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+        remaining = std::clamp<std::int64_t>(remaining, 1, std::numeric_limits<int>::max());
+        pollfd wait{operation.descriptor(), POLLOUT, 0};
+        const int ready = ::poll(&wait, 1, static_cast<int>(remaining));
+        if (ready == 0) {
+            throw Error("socket write deadline exceeded");
+        }
+        if (ready < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            throw Error(socket_error("could not wait for socket write"));
+        }
+        const ssize_t written = ::send(operation.descriptor(), data.data() + offset,
+                                       data.size() - offset, MSG_NOSIGNAL | MSG_DONTWAIT);
+        if (written > 0) {
+            offset += static_cast<std::size_t>(written);
+            continue;
+        }
+        if (written < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
+            continue;
+        }
+        throw Error(socket_error("socket write failed"));
+    }
+}
+
+std::optional<std::size_t> Socket::send_some(std::span<const Byte> data) const {
+    if (data.empty()) {
+        return std::size_t{0};
+    }
+    SocketOperation operation(state_);
+    for (;;) {
+        const ssize_t written =
+            ::send(operation.descriptor(), data.data(), data.size(), MSG_NOSIGNAL | MSG_DONTWAIT);
+        if (written >= 0) {
+            return static_cast<std::size_t>(written);
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return std::nullopt;
         }
         throw Error(socket_error("socket write failed"));
     }
@@ -323,6 +439,67 @@ bool Socket::receive_exact(std::span<Byte> output) const {
         throw Error(socket_error("socket read failed"));
     }
     return true;
+}
+
+bool Socket::receive_exact_until(std::span<Byte> output,
+                                 std::chrono::steady_clock::time_point deadline) const {
+    SocketOperation operation(state_);
+    std::size_t offset = 0;
+    while (offset < output.size()) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+            throw Error("socket read deadline exceeded");
+        }
+        auto remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+        remaining = std::clamp<std::int64_t>(remaining, 1, std::numeric_limits<int>::max());
+        pollfd wait{operation.descriptor(), POLLIN, 0};
+        const int ready = ::poll(&wait, 1, static_cast<int>(remaining));
+        if (ready == 0) {
+            throw Error("socket read deadline exceeded");
+        }
+        if (ready < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            throw Error(socket_error("could not wait for socket read"));
+        }
+        const ssize_t received = ::recv(operation.descriptor(), output.data() + offset,
+                                        output.size() - offset, MSG_DONTWAIT);
+        if (received > 0) {
+            offset += static_cast<std::size_t>(received);
+            continue;
+        }
+        if (received == 0) {
+            return false;
+        }
+        if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+            continue;
+        }
+        throw Error(socket_error("socket read failed"));
+    }
+    return true;
+}
+
+std::optional<std::size_t> Socket::receive_some(std::span<Byte> output) const {
+    if (output.empty()) {
+        return std::size_t{0};
+    }
+    SocketOperation operation(state_);
+    for (;;) {
+        const ssize_t received =
+            ::recv(operation.descriptor(), output.data(), output.size(), MSG_DONTWAIT);
+        if (received >= 0) {
+            return static_cast<std::size_t>(received);
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return std::nullopt;
+        }
+        throw Error(socket_error("socket read failed"));
+    }
 }
 
 std::optional<std::string> Socket::receive_line(std::size_t maximum) const {

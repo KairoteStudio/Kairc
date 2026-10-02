@@ -49,6 +49,16 @@ Identity Identity::generate() {
     return identity;
 }
 
+Identity Identity::from_seed(const Key &seed) {
+    initialize();
+    Identity identity;
+    if (crypto_sign_seed_keypair(identity.public_key.data(), identity.secret_key.data(),
+                                 seed.data()) != 0) {
+        throw Error("Ed25519 seed expansion failed");
+    }
+    return identity;
+}
+
 Identity::~Identity() {
     wipe(secret_key);
 }

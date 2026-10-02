@@ -22,6 +22,7 @@ void stop_signal(int) {
 void usage() {
     std::cout << "Usage: kaircd [--config PATH] [--check-config]\n"
                  "       kaircd --gen-channel-secret\n"
+                 "       kaircd --gen-peer-identity\n"
                  "       kaircd --version\n";
 }
 
@@ -44,8 +45,18 @@ int main(int argc, char **argv) {
                 kairc::crypto::initialize();
                 std::cout << kairc::hex(kairc::crypto::random_bytes(32)) << '\n';
                 return 0;
+            } else if (argument == "--gen-peer-identity") {
+                kairc::crypto::initialize();
+                kairc::Key seed =
+                    kairc::fixed_bytes<32>(kairc::crypto::random_bytes(32), "identity seed");
+                const kairc::crypto::Identity identity = kairc::crypto::Identity::from_seed(seed);
+                std::cout << "p2p_identity_seed = " << kairc::hex(seed) << '\n'
+                          << "# share this public key with trusted peers:\n"
+                          << "# trusted_peer = " << kairc::hex(identity.public_key) << '\n';
+                kairc::crypto::wipe(seed);
+                return 0;
             } else if (argument == "--version") {
-                std::cout << "kaircd 0.2.0-dev (C++ event-graph prototype)\n";
+                std::cout << "kaircd 0.4.0-dev (C++ event-graph prototype)\n";
                 return 0;
             } else if (argument == "--help" || argument == "-h") {
                 usage();
@@ -79,7 +90,14 @@ int main(int argc, char **argv) {
             }
         }
 
-        kairc::PeerNetwork peers(node, config.p2p_listen, config.peers);
+        kairc::PeerNetwork peers(node, config.p2p_listen, config.peers, config.peer_limits,
+                                 config.p2p_identity_seed, std::move(config.trusted_peer_keys),
+                                 config.allow_unknown_inbound, config.allow_unknown_outbound,
+                                 std::move(config.discovery), config.tor_proxy);
+        if (config.p2p_identity_seed) {
+            kairc::crypto::wipe(*config.p2p_identity_seed);
+            config.p2p_identity_seed.reset();
+        }
         kairc::IrcGateway gateway(node, config.irc_listen,
                                   [&peers](const kairc::Event &event) { peers.broadcast(event); });
         node.set_message_handler(
@@ -91,7 +109,7 @@ int main(int argc, char **argv) {
         gateway.start();
         std::cout << "kaircd: local IRC gateway ready on " << config.irc_listen.host << ':'
                   << config.irc_listen.port << '\n';
-        std::cout << "kaircd: ephemeral node identity; " << config.node.retention_hours
+        std::cout << "kaircd: authenticated P2P identity; " << config.node.retention_hours
                   << " hourly DAG(s) retained\n";
 
         while (running.load()) {

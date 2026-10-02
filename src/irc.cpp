@@ -8,6 +8,8 @@
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
+#include <ctime>
 #include <deque>
 #include <iostream>
 #include <mutex>
@@ -74,6 +76,61 @@ std::string wire(std::string_view prefix, std::string_view command,
         return {};
     }
     output += "\r\n";
+    return output;
+}
+
+std::string tagged_wire(std::string_view tags, std::string_view prefix, std::string_view command,
+                        std::initializer_list<std::string_view> parameters) {
+    std::string plain = wire(prefix, command, parameters);
+    if (plain.empty() || tags.empty()) {
+        return plain;
+    }
+    if (tags.find_first_of(" \r\n") != std::string_view::npos ||
+        tags.find('\0') != std::string_view::npos) {
+        return {};
+    }
+    std::string output = "@" + std::string(tags) + " " + plain;
+    if (output.size() > kMaximumIrcPayload + 2) {
+        return {};
+    }
+    return output;
+}
+
+std::string irc_timestamp(std::uint64_t timestamp_ms) {
+    const std::time_t seconds = static_cast<std::time_t>(timestamp_ms / 1'000ULL);
+    std::tm broken_down{};
+    if (gmtime_r(&seconds, &broken_down) == nullptr) {
+        return {};
+    }
+    char date[32]{};
+    if (std::strftime(date, sizeof(date), "%Y-%m-%dT%H:%M:%S", &broken_down) == 0) {
+        return {};
+    }
+    char output[40]{};
+    const int written = std::snprintf(output, sizeof(output), "%s.%03uZ", date,
+                                      static_cast<unsigned int>(timestamp_ms % 1'000ULL));
+    if (written <= 0 || static_cast<std::size_t>(written) >= sizeof(output)) {
+        return {};
+    }
+    return output;
+}
+
+std::vector<std::string> split_spaces(std::string_view value) {
+    std::vector<std::string> output;
+    while (!value.empty()) {
+        while (!value.empty() && value.front() == ' ') {
+            value.remove_prefix(1);
+        }
+        if (value.empty()) {
+            break;
+        }
+        const auto space = value.find(' ');
+        output.emplace_back(value.substr(0, space));
+        if (space == std::string_view::npos) {
+            break;
+        }
+        value.remove_prefix(space + 1);
+    }
     return output;
 }
 
@@ -183,6 +240,9 @@ class IrcGateway::Impl {
         bool user_received = false;
         bool registered = false;
         bool cap_negotiating = false;
+        bool message_tags = false;
+        bool server_time = false;
+        bool batch = false;
         std::set<std::string> channels;
         std::deque<std::chrono::steady_clock::time_point> recent_messages;
         std::atomic<bool> alive{true};
@@ -248,8 +308,7 @@ class IrcGateway::Impl {
                 joined = client->registered && client->channels.contains(message.channel);
             }
             if (joined) {
-                client->send(wire(message.nickname + "!anon@p2p.kairc", "PRIVMSG",
-                                  {message.channel, message.text}));
+                send_message(client, message);
             }
         }
     }
@@ -345,11 +404,42 @@ class IrcGateway::Impl {
                     std::lock_guard lock(client->state_mutex);
                     client->cap_negotiating = true;
                 }
-                client->send(wire("kairc.local", "CAP", {nick_or_star(client), "LS", ""}));
+                client->send(wire("kairc.local", "CAP",
+                                  {nick_or_star(client), "LS", "message-tags server-time batch"}));
             } else if (subcommand == "REQ") {
                 const std::string request =
                     command.parameters.size() > 1 ? command.parameters.back() : "";
-                client->send(wire("kairc.local", "CAP", {nick_or_star(client), "NAK", request}));
+                bool supported = !request.empty();
+                const auto capabilities = split_spaces(request);
+                for (const std::string &raw : capabilities) {
+                    const std::string_view name = raw.starts_with('-')
+                                                      ? std::string_view(raw).substr(1)
+                                                      : std::string_view(raw);
+                    if (name != "message-tags" && name != "server-time" && name != "batch") {
+                        supported = false;
+                    }
+                }
+                if (!supported) {
+                    client->send(
+                        wire("kairc.local", "CAP", {nick_or_star(client), "NAK", request}));
+                } else {
+                    std::lock_guard lock(client->state_mutex);
+                    for (const std::string &raw : capabilities) {
+                        const bool enabled = !raw.starts_with('-');
+                        const std::string_view name =
+                            enabled ? std::string_view(raw) : std::string_view(raw).substr(1);
+                        if (name == "message-tags") {
+                            client->message_tags = enabled;
+                        } else if (name == "server-time") {
+                            client->server_time = enabled;
+                        } else if (name == "batch") {
+                            client->batch = enabled;
+                        }
+                    }
+                    client->send(
+                        wire("kairc.local", "CAP",
+                             {client->nickname.empty() ? "*" : client->nickname, "ACK", request}));
+                }
             } else if (subcommand == "END") {
                 {
                     std::lock_guard lock(client->state_mutex);
@@ -475,7 +565,7 @@ class IrcGateway::Impl {
         }
         numeric(client, 1, {"Welcome to Kairc, " + nickname + ". No account was created."});
         numeric(client, 2, {"Your IRC connection stays on this machine; events travel over P2P."});
-        numeric(client, 4, {"kairc.local", "Kairc-0.2.0-dev", "", "n"});
+        numeric(client, 4, {"kairc.local", "Kairc-0.4.0-dev", "", "n"});
         numeric(
             client, 5,
             {"CHANTYPES=#", "CASEMAPPING=rfc1459", "NICKLEN=24", "NETWORK=Kairc", "are supported"});
@@ -519,6 +609,7 @@ class IrcGateway::Impl {
                     : "Public channel; messages are readable by every relaying node.";
             numeric(client, 332, {channel, privacy});
             send_names(client, channel);
+            send_history(client, channel);
         }
     }
 
@@ -596,6 +687,103 @@ class IrcGateway::Impl {
             }
         } catch (const Error &exception) {
             numeric(client, 439, {channel, exception.what()});
+        }
+    }
+
+    std::string next_batch_id() {
+        return "kairc" + std::to_string(batch_counter_.fetch_add(1));
+    }
+
+    void send_message(const std::shared_ptr<Client> &client, const DeliveredMessage &message,
+                      std::string_view batch_id = {}) {
+        bool message_tags = false;
+        bool server_time = false;
+        {
+            std::lock_guard lock(client->state_mutex);
+            message_tags = client->message_tags;
+            server_time = client->server_time;
+        }
+
+        std::vector<std::string> tags;
+        if (!batch_id.empty()) {
+            tags.push_back("batch=" + std::string(batch_id));
+        }
+        if (server_time) {
+            const std::string timestamp = irc_timestamp(message.timestamp_ms);
+            if (!timestamp.empty()) {
+                tags.push_back("time=" + timestamp);
+            }
+        }
+        if (message.replayed && message_tags) {
+            tags.emplace_back("kairc.io/replay=1");
+        }
+
+        const auto join_tags = [](const std::vector<std::string> &values) {
+            std::string joined;
+            for (const std::string &value : values) {
+                if (!joined.empty()) {
+                    joined += ';';
+                }
+                joined += value;
+            }
+            return joined;
+        };
+        const std::string prefix = message.nickname + "!anon@p2p.kairc";
+        std::string line =
+            tagged_wire(join_tags(tags), prefix, "PRIVMSG", {message.channel, message.text});
+        if (line.empty() && message.replayed && message_tags) {
+            std::erase(tags, "kairc.io/replay=1");
+            line = tagged_wire(join_tags(tags), prefix, "PRIVMSG", {message.channel, message.text});
+        }
+        if (line.empty() && !batch_id.empty()) {
+            line = tagged_wire("batch=" + std::string(batch_id), prefix, "PRIVMSG",
+                               {message.channel, message.text});
+        }
+        if (line.empty()) {
+            line = wire(prefix, "PRIVMSG", {message.channel, message.text});
+        }
+        const bool replay_is_explicit =
+            (!batch_id.empty() && line.find("batch=") != std::string::npos) ||
+            line.find("kairc.io/replay=1") != std::string::npos || line.starts_with("@time=") ||
+            line.find(";time=") != std::string::npos;
+        if (message.replayed && !replay_is_explicit) {
+            client->send(
+                wire("kairc.local", "NOTICE",
+                     {message.channel, "Delayed event follows; this client did not negotiate "
+                                       "a replay marker that fits this line."}));
+        }
+        client->send(std::move(line));
+    }
+
+    void send_history(const std::shared_ptr<Client> &client, const std::string &channel) {
+        bool supports_batch = false;
+        bool supports_timestamped_replay = false;
+        {
+            std::lock_guard lock(client->state_mutex);
+            supports_batch = client->batch;
+            supports_timestamped_replay = client->server_time || client->message_tags;
+        }
+        if (!supports_batch && !supports_timestamped_replay) {
+            return;
+        }
+        const std::vector<DeliveredMessage> history = node_.history(channel, 100);
+        if (history.empty()) {
+            return;
+        }
+
+        std::string batch_id;
+        if (supports_batch) {
+            batch_id = next_batch_id();
+            client->send(wire("kairc.local", "BATCH", {"+" + batch_id, "kairc/replay", channel}));
+        } else {
+            client->send(
+                wire("kairc.local", "NOTICE", {channel, "Replaying canonical local history."}));
+        }
+        for (const DeliveredMessage &message : history) {
+            send_message(client, message, batch_id);
+        }
+        if (!batch_id.empty()) {
+            client->send(wire("kairc.local", "BATCH", {"-" + batch_id}));
         }
     }
 
@@ -731,6 +919,7 @@ class IrcGateway::Impl {
     std::atomic<std::size_t> active_clients_{0};
     std::mutex active_mutex_;
     std::condition_variable active_changed_;
+    std::atomic<std::uint64_t> batch_counter_{1};
 };
 
 IrcGateway::IrcGateway(Node &node, HostPort listen,

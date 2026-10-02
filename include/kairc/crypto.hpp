@@ -26,6 +26,7 @@ struct Identity {
     Identity &operator=(Identity &&other) noexcept;
 
     static Identity generate();
+    static Identity from_seed(const Key &seed);
     Signature sign(std::span<const Byte> message) const;
 };
 
